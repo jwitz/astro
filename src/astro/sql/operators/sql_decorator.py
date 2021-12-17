@@ -90,6 +90,12 @@ class SqlDecoratoratedOperator(DecoratedOperator):
         conn = BaseHook.get_connection(self.conn_id)
         self.conn_type = conn.conn_type  # type: ignore
         self.schema = self.schema or get_schema()
+
+        # In the case of postgres, we need to add the schema to the table name in the query
+        if self.conn_type == "postgres":
+            self.schema_id = self.schema
+        else:
+            self.schema_id = None
         self.user = conn.login
         self.run_id = context.get("run_id")
         self.convert_op_arg_dataframes()
@@ -119,14 +125,10 @@ class SqlDecoratoratedOperator(DecoratedOperator):
 
             if not self.output_table:
                 output_table_name = create_table_name(
-                    context=context, schema_id=self.schema
+                    context=context, schema_id=self.schema_id
                 )
             else:
                 output_table_name = self.output_table.table_name
-            if not output_table_name.isidentifier():
-                raise ValueError(
-                    f"Error: We were unable to create a valid SQL table name: result {output_table_name}"
-                )
             self.sql = self.create_temporary_table(self.sql, output_table_name)
 
         # Automatically add any kwargs going into the function

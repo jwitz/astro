@@ -123,7 +123,7 @@ class TestSnowflakeOperator(unittest.TestCase):
 
         drop_table(
             snowflake_conn=hook.get_conn(),
-            table_name='"DWH_LEGACY"."SANDBOX_AIRFLOW_TEST"."SNOWFLAKE_TRANSFORM_TEST_TABLE"',
+            table_name='"DWH_LEGACY"."TMP_ASTRO"."SNOWFLAKE_TRANSFORM_TEST_TABLE"',
         )
         with self.dag:
             f = sample_snow(
