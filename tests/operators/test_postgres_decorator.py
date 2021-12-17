@@ -29,6 +29,7 @@ import unittest.mock
 from unittest import mock
 
 import pandas as pd
+import pytest
 from airflow.models import DAG, DagRun
 from airflow.models import TaskInstance as TI
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -133,6 +134,24 @@ class TestPostgresDecorator(unittest.TestCase):
         wait_for_task_finish(dr, my_df.operator.task_id)
         pg_df.operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
         wait_for_task_finish(dr, pg_df.operator.task_id)
+
+    def test_with_invalid_dag_name(self):
+        self.dag.dag_id = "my=dag"
+
+        @aql.transform()
+        def sample_pg(input_table: Table):
+            return "SELECT * FROM {input_table} WHERE last_name LIKE 'G%%'"
+
+        with pytest.raises(ValueError):
+            self.create_and_run_task(
+                sample_pg,
+                (),
+                {
+                    "input_table": Table(
+                        table_name="actor", conn_id="postgres_conn", database="pagila"
+                    ),
+                },
+            )
 
     def test_dataframe_to_postgres_kwarg(self):
         @df
