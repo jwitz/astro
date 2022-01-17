@@ -30,6 +30,7 @@ import pathlib
 import unittest.mock
 
 import pandas as pd
+import pytest
 import utils as test_utils
 from airflow.exceptions import DuplicateTaskIdFound
 from airflow.models import DAG, DagRun
@@ -50,6 +51,9 @@ from astro.sql.table import Table, TempTable
 
 log = logging.getLogger(__name__)
 DEFAULT_DATE = timezone.datetime(2016, 1, 1)
+OUTPUT_TABLE_NAME = test_utils.get_table_name("load_file_test_table")
+OUTPUT_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
+CWD = pathlib.Path(__file__).parent
 
 
 def drop_table_postgres(table_name, postgres_conn):
@@ -65,7 +69,6 @@ class TestAgnosticLoadFile(unittest.TestCase):
     Test agnostic load file.
     """
 
-    cwd = pathlib.Path(__file__).parent
     gcs_creds_filename = "gcp_credentials.json"
     bucket_name = "dag-authoring"
     blob_file_name = "homes.csv"
@@ -98,7 +101,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
         self.init_storage_client()
 
     def setup_gcs_credentials_for_astro(self):
-        path = str(self.cwd) + "/" + self.gcs_creds_filename
+        path = str(CWD) + "/" + self.gcs_creds_filename
         if os.path.isfile(path):
             self.delete_gcs_creds()
 
@@ -119,14 +122,12 @@ class TestAgnosticLoadFile(unittest.TestCase):
     def upload_blob(self):
         self.delete_blob()
 
-        with open(str(self.cwd) + "/../data/" + str(self.blob_file_name)) as f:
+        with open(str(CWD) + "/../data/" + str(self.blob_file_name)) as f:
             content = f.read()
 
         bucket = self.storage_client.bucket(self.bucket_name)
         blob = bucket.blob(self.blob_file_name)
-        t = blob.upload_from_filename(
-            str(self.cwd) + "/../data/" + str(self.blob_file_name)
-        )
+        t = blob.upload_from_filename(str(CWD) + "/../data/" + str(self.blob_file_name))
         print("File uploaded.")
 
     def delete_blob(self):
@@ -139,7 +140,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
             print("File {} not found.".format(self.blob_file_name))
 
     def delete_gcs_creds(self):
-        os.remove(str(self.cwd) + "/" + self.gcs_creds_filename)
+        os.remove(str(CWD) + "/" + self.gcs_creds_filename)
 
     def clear_run(self):
         self.run = False
@@ -158,6 +159,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
             run_id=DagRunType.MANUAL.value,
             start_date=timezone.utcnow(),
             execution_date=DEFAULT_DATE,
+            data_interval=[DEFAULT_DATE, DEFAULT_DATE],
             state=State.RUNNING,
         )
         f.operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
@@ -208,7 +210,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
                     "func": load_file,
                     "op_args": (),
                     "op_kwargs": {
-                        "path": str(self.cwd) + "/../data/homes.csv",
+                        "path": str(CWD) + "/../data/homes.csv",
                         "file_conn_id": "",
                         "task_id": "task_id",
                         "output_table": Table(
@@ -236,7 +238,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
                     "func": load_file,
                     "op_args": (),
                     "op_kwargs": {
-                        "path": str(self.cwd) + "/../data/homes.csv",
+                        "path": str(CWD) + "/../data/homes.csv",
                         "file_conn_id": "",
                         "output_table": Table(
                             OUTPUT_TABLE_NAME,
@@ -269,7 +271,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
             load_file,
             (),
             {
-                "path": str(self.cwd) + "/../data/homes.csv",
+                "path": str(CWD) + "/../data/homes.csv",
                 "file_conn_id": "",
                 "output_table": TempTable(database="pagila", conn_id="postgres_conn"),
             },
@@ -307,7 +309,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
             load_file,
             (),
             {
-                "path": str(self.cwd) + "/../data/homes.csv",
+                "path": str(CWD) + "/../data/homes.csv",
                 "file_conn_id": "",
                 "output_table": Table(
                     table_name=OUTPUT_TABLE_NAME,
@@ -325,7 +327,7 @@ class TestAgnosticLoadFile(unittest.TestCase):
             load_file,
             (),
             {
-                "path": str(self.cwd) + "/../data/homes.csv",
+                "path": str(CWD) + "/../data/homes.csv",
                 "file_conn_id": "",
                 "output_table": Table(
                     table_name=OUTPUT_TABLE_NAME,
@@ -466,47 +468,94 @@ class TestAgnosticLoadFile(unittest.TestCase):
         )
         assert df.iloc[0].to_dict()["sell"] == 142.0
 
-    def test_aql_local_file_to_snowflake(self):
+
+@pytest.fixture
+def sample_dag():
+    yield DAG("test_dag", default_args={"owner": "airflow", "start_date": DEFAULT_DATE})
+    with create_session() as session:
+        session.query(DagRun).delete()
+        session.query(TI).delete()
+
+
+def create_and_run_task(dag, decorator_func, op_args, op_kwargs):
+    with dag:
+        function = decorator_func(*op_args, **op_kwargs)
+
+    _ = dag.create_dagrun(
+        run_id=DagRunType.MANUAL.value,
+        start_date=timezone.utcnow(),
+        data_interval=[DEFAULT_DATE, DEFAULT_DATE],
+        execution_date=DEFAULT_DATE,
+        state=State.RUNNING,
+    )
+    function.operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
+    return function
+
+
+@pytest.fixture
+def hook(request):
+    if request.param == "snowflake":
         hook = SnowflakeHook(
             snowflake_conn_id="snowflake_conn",
             schema=os.getenv("SNOWFLAKE_SCHEMA"),
             database=os.getenv("SNOWFLAKE_DATABASE"),
             warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
         )
-
-        # Drop target table
         hook.run(
-            f"DROP TABLE IF EXISTS {os.getenv('SNOWFLAKE_SCHEMA')}.{self.SNOWFLAKE_OUTPUT_TABLE_NAME}"
+            f"DROP TABLE IF EXISTS {os.getenv('SNOWFLAKE_SCHEMA')}.{OUTPUT_TABLE_NAME}"
         )
-        self.create_and_run_task(
-            load_file,
-            (),
-            {
-                "path": str(self.cwd) + "/../data/homes.csv",
-                "file_conn_id": "",
-                "output_table": Table(
-                    table_name=self.SNOWFLAKE_OUTPUT_TABLE_NAME,
-                    database=os.getenv("SNOWFLAKE_DATABASE"),
-                    schema=os.getenv("SNOWFLAKE_SCHEMA"),
-                    warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-                    conn_id="snowflake_conn",
-                ),
-            },
+        yield hook
+        hook.run(
+            f"DROP TABLE IF EXISTS {os.getenv('SNOWFLAKE_SCHEMA')}.{OUTPUT_TABLE_NAME}"
         )
+    elif request.param == "postgres":
+        POSTGRES_TABLE_NAME = "test_dag_load_file_homes_csv_2"
+        hook = TempPostgresHook(postgres_conn_id="postgres_conn", schema="pagila")
+        hook.run(f"DROP TABLE IF EXISTS tmp_astro.{OUTPUT_TABLE_NAME}")
+        yield hook
+        hook.run(f"DROP TABLE IF EXISTS tmp_astro.{OUTPUT_TABLE_NAME}")
+    else:
+        raise ValueError(f"Unsupported database {request.param}")
 
-        # Read table from db
-        df = hook.get_pandas_df(
-            f"SELECT * FROM {os.getenv('SNOWFLAKE_SCHEMA')}.{self.SNOWFLAKE_OUTPUT_TABLE_NAME}"
-        )
 
-        assert df.iloc[0].to_dict() == {
-            "SELL": 142.0,
-            "LIST": 160.0,
-            "LIVING": 28.0,
-            "ROOMS": 10.0,
-            "BEDS": 5.0,
-            "BATHS": 3.0,
-            "AGE": 60.0,
-            "ACRES": 0.28,
-            "TAXES": 3167.0,
+@pytest.mark.parametrize("hook", ["snowflake", "postgres"], indirect=True)
+@pytest.mark.parametrize("file_type", ["ndjson", "json", "csv"])
+def test_load_file(sample_dag, hook, file_type):
+    if isinstance(hook, TempPostgresHook):
+        params = {
+            "path": str(CWD) + f"/../data/sample.{file_type}",
+            "file_conn_id": "",
+            "output_table": Table(
+                table_name=OUTPUT_TABLE_NAME,
+                database="pagila",
+                conn_id="postgres_conn",
+            ),
         }
+        schema = "tmp_astro"
+    else:
+        params = {
+            "path": str(CWD) + f"/../data/sample.{file_type}",
+            "file_conn_id": "",
+            "output_table": Table(
+                table_name=OUTPUT_TABLE_NAME,
+                database=os.getenv("SNOWFLAKE_DATABASE"),
+                schema=OUTPUT_SCHEMA,
+                warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+                conn_id="snowflake_conn",
+            ),
+        }
+        schema = OUTPUT_SCHEMA
+
+    create_and_run_task(sample_dag, load_file, (), params)
+
+    # Read table from db
+    df = hook.get_pandas_df(f"SELECT * FROM {schema}.{OUTPUT_TABLE_NAME}")
+    assert len(df) == 3
+    expected = pd.DataFrame(
+        [
+            {"id": 1, "name": "First"},
+            {"id": 2, "name": "Second"},
+            {"id": 3, "name": "Third with unicode पांचाल"},
+        ]
+    )
+    assert df.rename(columns=str.lower).equals(expected)
