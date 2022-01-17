@@ -519,7 +519,7 @@ def hook(request):
 
 
 @pytest.mark.parametrize("hook", ["snowflake", "postgres"], indirect=True)
-@pytest.mark.parametrize("file_type", ["ndjson", "json", "csv"])
+@pytest.mark.parametrize("file_type", ["ndjson", "json", "csv", "parquet"])
 def test_load_file(sample_dag, hook, file_type):
     if isinstance(hook, TempPostgresHook):
         params = {
